@@ -5895,6 +5895,51 @@ func TestAccRDSInstance_SnapshotIdentifier_performanceInsightsEnabled(t *testing
 	})
 }
 
+func TestAccRDSInstance_SnapshotIdentifier_databaseInsightsMode(t *testing.T) {
+	ctx := acctest.Context(t)
+
+	// All RDS Instance tests should skip for testing.Short() except the 20 shortest running tests.
+	if testing.Short() {
+		t.Skip("skipping long-running test in short mode")
+	}
+
+	var dbInstance, sourceDbInstance types.DBInstance
+	var dbSnapshot types.DBSnapshot
+
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	sourceDbResourceName := "aws_db_instance.source"
+	snapshotResourceName := "aws_db_snapshot.test"
+	resourceName := "aws_db_instance.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			testAccPerformanceInsightsDefaultVersionPreCheck(ctx, t, tfrds.InstanceEngineMySQL)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.RDSServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
+			tfversion.SkipBelow(tfversion.Version1_11_0),
+		},
+		CheckDestroy: testAccCheckDBInstanceDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccInstanceConfig_SnapshotID_databaseInsightsMode(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckDBInstanceExists(ctx, t, sourceDbResourceName, &sourceDbInstance),
+					testAccCheckDBSnapshotExists(ctx, t, snapshotResourceName, &dbSnapshot),
+					testAccCheckDBInstanceExists(ctx, t, resourceName, &dbInstance),
+				),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("database_insights_mode"), knownvalue.StringExact("advanced")),
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("performance_insights_enabled"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("performance_insights_retention_period"), knownvalue.Int64Exact(7)),
+				},
+			},
+		},
+	})
+}
+
 func TestAccRDSInstance_CACertificate_latest(t *testing.T) {
 	ctx := acctest.Context(t)
 
@@ -13866,6 +13911,52 @@ resource "aws_db_instance" "test" {
   instance_class                        = aws_db_instance.source.instance_class
   performance_insights_enabled          = true
   performance_insights_kms_key_id       = aws_kms_key.test.arn
+  performance_insights_retention_period = 7
+  snapshot_identifier                   = aws_db_snapshot.test.id
+  skip_final_snapshot                   = true
+}
+`, tfrds.InstanceEngineMySQL, mainInstanceClasses, rName))
+}
+
+func testAccInstanceConfig_SnapshotID_databaseInsightsMode(rName string) string {
+	return acctest.ConfigCompose(
+		acctest.ConfigRandomPassword(),
+		fmt.Sprintf(`
+data "aws_rds_engine_version" "default" {
+  engine = %[1]q
+}
+
+data "aws_rds_orderable_db_instance" "test" {
+  engine                        = data.aws_rds_engine_version.default.engine
+  engine_version                = data.aws_rds_engine_version.default.version
+  license_model                 = "general-public-license"
+  storage_type                  = "standard"
+  supports_performance_insights = true
+  preferred_instance_classes    = [%[2]s]
+}
+
+resource "aws_db_instance" "source" {
+  allocated_storage   = 5
+  engine              = data.aws_rds_engine_version.default.engine
+  engine_version      = data.aws_rds_engine_version.default.version
+  identifier          = "%[3]s-source"
+  instance_class      = data.aws_rds_orderable_db_instance.test.instance_class
+  password_wo         = ephemeral.aws_secretsmanager_random_password.test.random_password
+  password_wo_version = 1
+  username            = "tfacctest"
+  skip_final_snapshot = true
+}
+
+resource "aws_db_snapshot" "test" {
+  db_instance_identifier = aws_db_instance.source.identifier
+  db_snapshot_identifier = %[3]q
+}
+
+resource "aws_db_instance" "test" {
+  identifier                            = %[3]q
+  instance_class                        = aws_db_instance.source.instance_class
+  database_insights_mode                = "advanced"
+  performance_insights_enabled          = true
   performance_insights_retention_period = 7
   snapshot_identifier                   = aws_db_snapshot.test.id
   skip_final_snapshot                   = true
